@@ -1,0 +1,69 @@
+import os
+
+def sql_create_table():
+    filenames = os.listdir('F:\\testdata\\dukas\\')
+
+    sym_num = len(filenames)
+    symbols = [0] * sym_num
+    count = 0
+    for i,path in enumerate(filenames):
+        symbols[i] = path[0:6]
+    print symbols
+
+    f = open('F:\\testdata\\sql_create_table_m1.txt','w')
+    for symbol in symbols:
+        sql_command = 'CREATE TABLE `' + symbol + '_m1`(\n' \
+                                                  ' `time` varchar(100) not null default \'\',\n' \
+                                                  ' `open` double default null,\n' \
+                                                  ' `high` double default null,\n' \
+                                                  ' `low` double default null,\n' \
+                                                  ' `close` double default null,\n' \
+                                                  ' `volume` int(11) default null,\n' \
+                                                  ' PRIMARY KEY (`time`)\n' \
+                                                  ') ENGINE=InnoDB DEFAULT CHARSET=utf8;\n'
+        f.write(sql_command)
+
+    f.close()
+
+    f = open('F:\\testdata\\sql_load_data_m1.txt','w')
+    for symbol in symbols:
+        sql_command = "truncate " +  symbol +"_m1;load data infile 'C:\\\\dukas\\\\" + symbol + "_M1.csv' into table " + symbol + "_m1 fields terminated by ',' optionally enclosed by '\"' escaped by '\"' lines terminated by '\\r\\n';commit;commit;\n"
+        f.write(sql_command)
+
+    f.close()
+
+
+def sql_update_data():
+    files_path = 'F:\\testdata\\dukas\\'
+    time_frame = 'H1'
+    output_path = 'F:\\testdata\\sql_update_data.txt'
+
+    path_in_sql_line = 'C:\\201611_db\\'
+
+    filenames = os.listdir(files_path)
+
+    sym_num = len(filenames)
+    symbols = [0] * sym_num
+    count = 0
+    for i, path in enumerate(filenames):
+        symbols[i] = path[0:6]
+    print symbols
+
+    f = open(output_path, 'w')
+    for symbol in symbols:
+        sql_path = 'C:\\\\201610_cleansed\\\\%s_%s_UTC+0_00_2016M10.csv'%(symbol,time_frame)
+        sql_command = 'load data infile \'%s\' ignore into table %s_%s fields terminated by \',\' optionally enclosed by \'\"\' escaped by \'\"\' lines terminated by \'\\r\\n\';commit;commit;\n' %(sql_path,symbol,time_frame)
+        f.write(sql_command)
+
+    f.close()
+
+    f = open('F:\\testdata\\sql_load_data_m1.txt', 'w')
+    for symbol in symbols:
+        sql_command = "truncate " + symbol + "_m1;load data infile 'C:\\\\dukas\\\\" + symbol + "_M1.csv' into table " + symbol + "_m1 fields terminated by ',' optionally enclosed by '\"' escaped by '\"' lines terminated by '\\r\\n';commit;commit;\n"
+        f.write(sql_command)
+
+    f.close()
+
+if __name__ == '__main__':
+    #sql_create_table()
+    sql_update_data()
