@@ -1,17 +1,28 @@
 import datetime as dt
-import urllib
+import urllib2
 from bs4 import BeautifulSoup
 import pandas as pd
 import time
 import csv
 import MySQLdb
 from sqlalchemy import create_engine
+import logging
 
 
 def parsePage(url):
+    while True:
+        try:
+            r = urllib2.Request(url)
+            page = urllib2.urlopen(r, data=None, timeout=10)
 
-    page = urllib.urlopen(url)
-    soup = BeautifulSoup(page)
+            soup = BeautifulSoup(page, 'lxml')
+            break
+        except Exception, e:
+            logging.warning('exception(parse):{0}'.format(str(e)))
+            #page.close()
+            time.sleep(10)
+
+    page.close()
 
     pre_id_str = ''
 
@@ -19,7 +30,8 @@ def parsePage(url):
     time_delta = dt.timedelta(days=time_current.weekday() + 1)
     year = (time_current - time_delta).year
 
-    time_delta_for_timezone = dt.timedelta(hours=5)
+    # be aware of the switch between summer and winter time
+    time_delta_for_timezone = dt.timedelta(hours=4)
 
     temp_buffer = {}
 
@@ -99,18 +111,25 @@ def inspectEvent (df):
     time_current = dt.datetime.now() - time_delta_for_localtime
 
     time_current_str = dt.datetime.strftime(time_current, '%Y.%m.%d %H:%M')
-    print time_current
+    #print time_current
     criterion = df['forecast'].map(lambda x:x is not None)
     upcoming_event = df[criterion]
     upcoming_event = upcoming_event.loc[lambda df:df.time > time_current_str]
     #print upcoming_event
 
-    upcoming_time = upcoming_event.iloc[0]['time']
-    upcoming_event = upcoming_event.loc[lambda df:df.time == upcoming_time]
+    if not upcoming_event.empty:
+        upcoming_time = upcoming_event.iloc[0]['time']
+        upcoming_event = upcoming_event.loc[lambda df:df.time == upcoming_time]
 
-    secs_left = (dt.datetime.strptime(upcoming_time, '%Y.%m.%d %H:%M') - time_current).seconds
+        #secs_left = (dt.datetime.strptime(upcoming_time, '%Y.%m.%d %H:%M') - time_current).seconds
 
-    return  secs_left,upcoming_event
+        local_upcoming_time = dt.datetime.strptime(upcoming_time, '%Y.%m.%d %H:%M') + time_delta_for_localtime
+
+        return  local_upcoming_time,upcoming_event
+    else:
+        #  unkown network error, causing no future event
+        logging.warning('calander error: no future event')
+        return dt.datetime(1970,1,1), upcoming_event
 
     '''
     time_current_uplimit = time_current + dt.timedelta(minutes=10)
@@ -126,9 +145,22 @@ def inspectEvent (df):
     print current_event.empty
     '''
 
-def findActual(df_events, df_result,datebase_ip, table_name):
-    page = urllib.urlopen(url)
-    soup = BeautifulSoup(page)
+def findActual(df_events, df_result, url, datebase_ip, table_name): # web content change, return -1, cannot find actual return 0, find actual return 1
+    while True:
+        try:
+            r = urllib2.Request(url)
+            page = urllib2.urlopen(r, data=None, timeout=10)
+
+            soup = BeautifulSoup(page, 'lxml')
+            break
+        except Exception,e:
+            logging.warning('exception(find actual):{0}'.format(str(e)))
+            #page.close()
+            print url
+            time.sleep(10)
+
+    page.close()
+
     time_delta_for_localtime = dt.timedelta(hours=8)
 
     pre_id_str = ''
@@ -157,17 +189,29 @@ def findActual(df_events, df_result,datebase_ip, table_name):
                 temp_buffer = search_df.iloc[0].to_dict()
                 for child in event_id.children:
                     try:
-                        if child['class'][2] == 'actual':
+                        # check whether the content of the website have changed
+                        if child['class'][2] == 'event':
+                            div = child.div
+                            if div is not None:
+                                if search_df.iloc[0]['event'] != div.span.string:
+                                    print 'web content changed'
+                                    return -1 # web content change
+                        elif child['class'][2] == 'actual':
                             value = child.string
                             if value is None:
-                                return  False
+                                return  0 # cannot find actual
                             else:
                                 temp_buffer['actual'] = value
-                                updateAcutalValue(datebase_ip,table_name,id_num,value)
+                                updateAcutalValue(datebase_ip,table_name,id_num,value) # update database
+                                df_events.loc[search_df.index[0],'actual'] = value # update buffer
+
+                                print df_events
+
                                 temp_buffer['record time'] = dt.datetime.strftime(
                                     dt.datetime.now() - time_delta_for_localtime, '%Y.%m.%d %H:%M')
                                 df_result.loc[df_result['webid'].size] = temp_buffer
                                 print temp_buffer
+
                                 #write file
                                 try:
                                     with open('E:\\forex_factory.csv', 'ab') as csvfile:
@@ -175,14 +219,15 @@ def findActual(df_events, df_result,datebase_ip, table_name):
                                         writer.writerow(temp_buffer)
                                 except IOError:
                                     print 'write dict error'
+
                                 found_event_num += 1
                                 if found_event_num == total_event_num:
-                                    return True
+                                    return 1 # find all events
                     except TypeError, KeyError:
                         continue
             else:
                 if is_found_event:
-                    return False
+                    return 0 # already pass the events we want to find actual for, meaning not found actual value for them
 
 def updateCurrentNewsTable(ip, table_name, df):
     engine = create_engine('mysql+mysqldb://root:@%s:3306/forex_news' % ip, pool_recycle = 300)
@@ -197,30 +242,42 @@ def updateAcutalValue(ip,table_name, webid, actual_value):
 
         sql_line = 'update %s set actual = \'%s\' where webid = %d;' % (table_name, actual_value,webid)
         #sql_line = 'select * from %s where webid = %d' %(table_name,webid)
-        print sql_line
+        logging.debug(sql_line)
 
         num = cur.execute(sql_line)
         #'CREATE TABLE `current_news`(`id` int(11) default null,`webid` int(11) default null,`time` varchar(50) not null default \'\',`event` varchar(100) not null default \'\', `currency` varchar(10) not null default \'\', `impact` varchar(20) not null default \'\', `actual` varchar(20) not null default \'\', `forecast` varchar(20) not null default \'\', `previous` varchar(20) not null default \'\', PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8;')
-        print 'sql return:',num
+        logging.debug('sql return:%d'%num)
 
         #print cur.fetchone()
         conn.commit()
         cur.close()
         conn.close()
     except MySQLdb.Warning, w:
-        print 'warning:', w
+        logging.warning('warning:{0}'.format(str(w)) )
 
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG,
+                        format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
+                        datefmt='%a, %d %b %Y %H:%M:%S',
+                        filename='live_bug.log',
+                        filemode='w')
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger('').addHandler(console)
+
     url = 'http://www.forexfactory.com/calendar.php'
-    datebase_ip = '192.168.2.103'
+    database_ip = '127.0.0.1'
 
     current_news_table_name = 'current_news'
 
     calender = parsePage(url)
 
-    updateCurrentNewsTable(datebase_ip,current_news_table_name,calender)
+    updateCurrentNewsTable(database_ip,current_news_table_name,calender)
 
     #updateAcutalValue(datebase_ip,current_news_table_name,70268,'0.5%')
 
@@ -231,26 +288,96 @@ if __name__ == '__main__':
     df_result = pd.DataFrame(columns=['webid', 'time', 'record time', 'event', 'currency', 'impact', 'actual', 'forecast', 'previous'])
 
     while current_index <= max_index:
-        secs_left, events = inspectEvent(calender)
+        #secs_left, events = inspectEvent(calender)
+        next_event_time, events = inspectEvent(calender)
+
         print events
-        print secs_left, dt.datetime.now() + dt.timedelta(seconds=secs_left)
+
+        #next_event_time = dt.datetime.now() + dt.timedelta(seconds=secs_left)
+        #print secs_left, next_event_time
+        logging.info('next event time:{0}'.format(dt.datetime.strftime(next_event_time,'%Y.%m.%d %H:%M')) )
 
         if events.empty:
             break
-        current_index = events.index[0]
+        current_index = events.index[-1] + 1
 
-        print 'sleeping...'
+        logging.debug('next index:%d'%current_index)
 
-        time.sleep(secs_left)
+        #print current_index, max_index
 
-        print 'fetching actual value...'
+        logging.info('sleeping...')
+
+        # time.sleep(secs_left)
+
+        #sleep, check whether web content has changed every 5 mins
+        while dt.datetime.now() < next_event_time:
+            new_calander = parsePage(url)
+
+            while new_calander.empty:
+                time.sleep(60)
+                new_calander = parsePage(url)
+
+            # events num are different, content changed
+            if calender.index.size != new_calander.index.size:
+                logging.info('detect web content changed')
+
+                next_event_time, events = inspectEvent(new_calander)
+
+                #if web error occurs, may be no future events
+                if events.empty:
+                    #new_calender = parsePage(url)
+                    #next_event_time, events = inspectEvent(new_calender)
+
+                    #time.sleep(5)
+                    break
+
+                else:
+                    print events
+
+                    calender = new_calander
+
+                    updateCurrentNewsTable(database_ip,current_news_table_name,new_calander)
+
+                    current_index = events.index[-1] + 1
+
+                    logging.debug('next index: %d'%current_index)
+
+            #check web page every 5 mins
+            time.sleep(300)
+
+        # awake
+        logging.info('fetching actual value...')
         while True:
-            if findActual(events, df_result,datebase_ip,current_news_table_name):
+            find_actual_signal = findActual(events, df_result,url,database_ip,current_news_table_name)
+            #found actual value
+            if find_actual_signal == 1:
                 break
+
+            elif find_actual_signal == 0:
+                #in case partially found, but not all found
+                criterion = events['actual'].map(lambda x: x is None)
+                events = events[criterion]
+                time.sleep(5)
+
             else:
-                time.sleep(2)
-            criterion = events['actual'].map(lambda x:x is None)
-            events = events[criterion]
+                # web content changed, update database and buffer(dataframe)
+                calender = parsePage(url)
+
+                updateCurrentNewsTable(database_ip, current_news_table_name, calender)
+
+                max_index = calender.index[-1]
+
+                stop_id = events.index[0]
+                logging.info('changed index %d: %s'% (stop_id, events.iloc[0]['event']))
+
+                criterion = calender['forecast'].map(lambda x:x is not None)
+                events = calender[criterion]
+                events = events['time'].loc[lambda df:df.time == events['time'].loc[stop_id]]
+                logging.info('new events...')
+                print events
+
+
+
 
     #print secs_left
     #print events
